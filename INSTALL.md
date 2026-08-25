@@ -1,0 +1,181 @@
+# Installation et mise en route
+
+Ce guide décrit pas à pas comment installer, démarrer et vérifier la stack
+(application PHP + OpenTelemetry Collector + Tempo + Prometheus + Loki +
+Grafana) sur une machine locale.
+
+## 1. Prérequis
+
+- **Docker** (moteur Docker) et **Docker Compose v2** (`docker compose`, sans tiret).
+  Vérifier :
+  ```bash
+  docker --version
+  docker compose version
+  ```
+- Ports disponibles sur la machine hôte : `8080`, `3000`, `9090`, `3200`, `3100`,
+  `4317`, `4318`, `8889`. Si l'un de ces ports est déjà utilisé, arrêter le
+  service concurrent ou modifier le mapping dans `docker-compose.yml`
+  (partie gauche du `ports:`, ex. `"8081:8080"`).
+- Aucune dépendance PHP/Composer à installer sur la machine hôte : tout se
+  fait dans le conteneur `app` lors du build.
+
+## 2. Récupérer le projet
+
+```bash
+cd /home/aia/workspace/claude/docker/opentelemetry
+```
+
+(Le projet est déjà présent à cet emplacement.)
+
+## 3. Construire et démarrer la stack
+
+```bash
+docker compose up -d --build
+```
+
+Cette commande :
+- construit l'image de l'application PHP (`app/Dockerfile`), y compris
+  `composer install` des dépendances OpenTelemetry ;
+- télécharge les images `otel/opentelemetry-collector-contrib`,
+  `grafana/tempo`, `grafana/loki`, `prom/prometheus`, `grafana/grafana` ;
+- démarre les 6 conteneurs sur le réseau Docker `observability`.
+
+Vérifier que tout est up :
+
+```bash
+docker compose ps
+```
+
+Tous les services doivent afficher l'état `Up`. Premier démarrage : compter
+quelques dizaines de secondes le temps du téléchargement des images.
+
+## 4. Vérifier que ça fonctionne
+
+### 4.1. Application
+
+```bash
+curl http://localhost:8080/
+curl http://localhost:8080/error
+```
+
+Chaque appel renvoie un JSON contenant un `trace_id` :
+
+```json
+{"status":"ok","route":"/","trace_id":"..."}
+```
+
+### 4.2. Traces (Tempo)
+
+```bash
+curl "http://localhost:3200/api/search?limit=5"
+```
+
+Doit lister les traces générées par les appels précédents (`rootServiceName":"php-app"`).
+
+### 4.3. Métriques (Prometheus)
+
+```bash
+curl http://localhost:8889/metrics | grep http_requests
+```
+
+Doit afficher des compteurs `otel_http_requests_total` avec les labels `route`/`method`.
+
+Vérifier aussi que Prometheus scrape bien le collector :
+
+```bash
+curl "http://localhost:9090/api/v1/targets" | grep -A3 otel-collector
+```
+
+Le champ `health` doit valoir `up`.
+
+### 4.4. Logs (Loki)
+
+```bash
+curl -sG "http://localhost:3100/loki/api/v1/query_range" \
+  --data-urlencode 'query={service_name="php-app"}' \
+  --data-urlencode 'limit=5'
+```
+
+Doit renvoyer des lignes de log (ex. `"Requête reçue"`) avec des labels
+`trace_id`/`span_id` correspondant aux traces générées.
+
+### 4.5. Grafana
+
+Ouvrir http://localhost:3000 (authentification anonyme activée, rôle Admin —
+aucun identifiant à saisir).
+
+Menu **Explore** (icône boussole dans la barre latérale) :
+- sélectionner la datasource **Tempo** et rechercher une trace récente ;
+- sélectionner **Prometheus** et exécuter `rate(otel_http_requests_total[1m])` ;
+- sélectionner **Loki** et exécuter `{service_name="php-app"}`.
+
+Depuis une ligne de log contenant `trace_id=...`, un lien apparaît pour
+sauter directement vers la trace correspondante dans Tempo.
+
+## 5. Régénérer des données
+
+Pour observer davantage de trafic (utile en Explore Grafana) :
+
+```bash
+for i in $(seq 1 20); do curl -s http://localhost:8080/ > /dev/null; done
+curl -s http://localhost:8080/error > /dev/null
+```
+
+## 6. Arrêter / redémarrer
+
+```bash
+# Arrêter les conteneurs (les volumes de données sont conservés)
+docker compose stop
+
+# Redémarrer
+docker compose start
+
+# Arrêter et supprimer les conteneurs (les volumes sont conservés)
+docker compose down
+
+# Tout supprimer, y compris les données stockées (Tempo/Loki/Prometheus/Grafana)
+docker compose down -v
+```
+
+## 7. Mettre à jour le code de l'application
+
+Après une modification de `app/public/index.php` ou `app/composer.json` :
+
+```bash
+docker compose build app
+docker compose up -d app
+```
+
+Après une modification d'un fichier de configuration (`otel-collector/config.yaml`,
+`prometheus/prometheus.yml`, `tempo/tempo.yaml`, `loki/loki-config.yaml`,
+`grafana/provisioning/**`), redémarrer uniquement le service concerné :
+
+```bash
+docker compose restart otel-collector   # exemple
+```
+
+## 8. Dépannage
+
+- **`docker compose ps` montre un service en `Restarting`** : consulter ses
+  logs, ex. `docker logs tempo` ou `docker logs loki`, pour voir l'erreur de
+  configuration.
+- **Aucune donnée dans Tempo/Loki/Prometheus alors que l'app répond** :
+  regarder les logs du collector, il possède un exportateur `debug` qui
+  affiche chaque lot envoyé :
+  ```bash
+  docker logs otel-collector -f
+  ```
+  Si rien n'apparaît après un `curl` sur l'app, le problème vient de
+  l'application (variables `OTEL_*` dans `docker-compose.yml`) ; si les
+  logs du collector montrent l'envoi mais rien n'arrive côté backend,
+  le problème vient de l'exportateur concerné (`otlp/tempo`, `prometheus`
+  ou `otlphttp/loki`) dans `otel-collector/config.yaml`.
+- **Port déjà utilisé au démarrage** : erreur du type
+  `Bind for 0.0.0.0:XXXX failed: port is already allocated`. Modifier le
+  mapping de port dans `docker-compose.yml` ou libérer le port occupé.
+- **Erreur `composer install` lors du build de `app`** : vérifier la
+  connectivité réseau du démon Docker (accès à `packagist.org`) ; relancer
+  `docker compose build app --no-cache` en dernier recours.
+
+Pour plus de détails sur l'architecture et le fonctionnement interne, voir
+[README.md](README.md).

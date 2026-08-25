@@ -1,0 +1,51 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+  resource:
+    attributes:
+      - key: service.namespace
+        value: demo
+        action: upsert
+
+exporters:
+  # Traces vers Tempo (OTLP gRPC natif)
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Métriques exposées au format Prometheus, scrapées par Prometheus
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otel
+
+  # Logs vers Loki (endpoint OTLP natif de Loki, depuis la v3.x)
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlphttp/loki, debug]
