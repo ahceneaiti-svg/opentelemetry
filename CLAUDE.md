@@ -36,6 +36,7 @@ exercising the running stack (see "Manual verification" below).
 ```bash
 curl http://localhost:8080/          # normal request, returns a trace_id
 curl http://localhost:8080/error     # forces an exception, exercises error path
+curl http://localhost:8080/data      # SELECT on Postgres items table, returns rows
 
 # confirm each backend actually received data for a given run:
 curl "http://localhost:3200/api/search?limit=5"                         # Tempo
@@ -45,7 +46,8 @@ curl -sG http://localhost:3100/loki/api/v1/query_range \
 ```
 
 Service UIs: app `:8080`, Grafana `:3000` (anonymous/Admin), Prometheus
-`:9090`, Tempo `:3200`, Loki `:3100`.
+`:9090`, Tempo `:3200`, Loki `:3100`, Postgres `:5432` (db `ot_db`,
+user/pass `otel`/`otel`).
 
 ## Architecture
 
@@ -56,8 +58,9 @@ collector at `otel-collector:4318`.
 
 ```
 php-app --OTLP/HTTP(json)--> otel-collector --otlp/tempo (gRPC)--> tempo
-                                     |------- prometheus exporter (:8889, scraped)--> prometheus
-                                     |------- otlphttp/loki (native OTLP /otlp)-----> loki
+   |                                |------- prometheus exporter (:8889, scraped)--> prometheus
+   |                                |------- otlphttp/loki (native OTLP /otlp)-----> loki
+   `--PDO (pgsql)--> postgres (db ot_db, table items)
 ```
 
 Three independent pipelines in `otel-collector/config.yaml` (traces/metrics/logs),
@@ -94,6 +97,13 @@ Key design choices that matter when modifying this:
   correlation via `derivedFields` (matches `trace_id=(\w+)` in log lines) and
   `tracesToLogsV2` on the Tempo datasource. Edit this file rather than the UI
   if correlation needs adjusting — UI changes won't survive `docker compose down -v`.
+
+- **Postgres is seeded once, at first container start.** `postgres/init.sql`
+  runs via the image's `docker-entrypoint-initdb.d` mechanism — it does not
+  re-run on subsequent `docker compose up` unless the `postgres-data` volume
+  is removed (`docker compose down -v`). `POSTGRES_*` env vars in
+  `docker-compose.yml` (host/port/db/user/password) are shared by both the
+  `postgres` and `app` services — keep them in sync if changed.
 
 ### Adding a new PHP route/feature
 

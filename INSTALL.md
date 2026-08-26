@@ -13,8 +13,8 @@ Grafana) sur une machine locale.
   docker compose version
   ```
 - Ports disponibles sur la machine hôte : `8080`, `3000`, `9090`, `3200`, `3100`,
-  `4317`, `4318`, `8889`. Si l'un de ces ports est déjà utilisé, arrêter le
-  service concurrent ou modifier le mapping dans `docker-compose.yml`
+  `4317`, `4318`, `8889`, `5432`. Si l'un de ces ports est déjà utilisé, arrêter
+  le service concurrent ou modifier le mapping dans `docker-compose.yml`
   (partie gauche du `ports:`, ex. `"8081:8080"`).
 - Aucune dépendance PHP/Composer à installer sur la machine hôte : tout se
   fait dans le conteneur `app` lors du build.
@@ -37,8 +37,11 @@ Cette commande :
 - construit l'image de l'application PHP (`app/Dockerfile`), y compris
   `composer install` des dépendances OpenTelemetry ;
 - télécharge les images `otel/opentelemetry-collector-contrib`,
-  `grafana/tempo`, `grafana/loki`, `prom/prometheus`, `grafana/grafana` ;
-- démarre les 6 conteneurs sur le réseau Docker `observability`.
+  `grafana/tempo`, `grafana/loki`, `prom/prometheus`, `grafana/grafana`,
+  `postgres:16-alpine` ;
+- démarre les 7 conteneurs sur le réseau Docker `observability` ; au premier
+  démarrage, Postgres exécute `postgres/init.sql` pour créer la base `ot_db`
+  et la table `items` (avec quelques lignes seedées).
 
 Vérifier que tout est up :
 
@@ -56,12 +59,19 @@ quelques dizaines de secondes le temps du téléchargement des images.
 ```bash
 curl http://localhost:8080/
 curl http://localhost:8080/error
+curl http://localhost:8080/data
 ```
 
 Chaque appel renvoie un JSON contenant un `trace_id` :
 
 ```json
 {"status":"ok","route":"/","trace_id":"..."}
+```
+
+`/data` renvoie en plus le résultat du `SELECT` sur la table `items` :
+
+```json
+{"status":"ok","route":"/data","trace_id":"...","data":[{"id":1,"name":"alpha","value":10,"created_at":"..."}, ...]}
 ```
 
 ### 4.2. Traces (Tempo)
@@ -112,6 +122,14 @@ Menu **Explore** (icône boussole dans la barre latérale) :
 Depuis une ligne de log contenant `trace_id=...`, un lien apparaît pour
 sauter directement vers la trace correspondante dans Tempo.
 
+### 4.6. Base de données (Postgres)
+
+```bash
+docker exec -it postgres psql -U otel -d ot_db -c "SELECT * FROM items;"
+```
+
+Doit afficher les lignes seedées par `postgres/init.sql` (`alpha`, `beta`, `gamma`).
+
 ## 5. Régénérer des données
 
 Pour observer davantage de trafic (utile en Explore Grafana) :
@@ -119,6 +137,7 @@ Pour observer davantage de trafic (utile en Explore Grafana) :
 ```bash
 for i in $(seq 1 20); do curl -s http://localhost:8080/ > /dev/null; done
 curl -s http://localhost:8080/error > /dev/null
+curl -s http://localhost:8080/data > /dev/null
 ```
 
 ## 6. Arrêter / redémarrer
@@ -176,6 +195,10 @@ docker compose restart otel-collector   # exemple
 - **Erreur `composer install` lors du build de `app`** : vérifier la
   connectivité réseau du démon Docker (accès à `packagist.org`) ; relancer
   `docker compose build app --no-cache` en dernier recours.
+- **`curl http://localhost:8080/data` renvoie `SQLSTATE[08006] ... Connection refused`** :
+  Postgres n'a pas encore fini son démarrage (première initialisation un peu
+  plus longue). Attendre quelques secondes et vérifier
+  `docker exec postgres pg_isready -U otel -d ot_db`, puis réessayer.
 
 Pour plus de détails sur l'architecture et le fonctionnement interne, voir
 [README.md](README.md).

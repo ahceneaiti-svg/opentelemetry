@@ -14,14 +14,14 @@ Le tout est visualisable dans **Grafana**, avec corrélation logs ↔ traces.
 ```
 ┌──────────┐   OTLP/HTTP    ┌────────────────────┐
 │ php-app  │ ─────────────► │  OTel Collector     │
-└──────────┘                │  (traces/metrics/   │
-                             │   logs)             │
-                             └──────┬──────┬───────┘
-                       OTLP gRPC │  │      │ OTLP HTTP (/otlp)
-                                 ▼  │      ▼
-                            ┌───────┴──┐ ┌──────┐
-                            │  Tempo   │ │ Loki │
-                            └──────────┘ └──────┘
+└────┬─────┘                │  (traces/metrics/   │
+     │ SQL (PDO)            │   logs)             │
+     ▼                      └──────┬──────┬───────┘
+┌──────────┐        OTLP gRPC │  │      │ OTLP HTTP (/otlp)
+│ postgres │                  ▼  │      ▼
+│ (ot_db)  │             ┌───────┴──┐ ┌──────┐
+└──────────┘             │  Tempo   │ │ Loki │
+                          └──────────┘ └──────┘
                                         ▲
                         Prometheus scrape (:8889)
                                         │
@@ -45,6 +45,8 @@ Le tout est visualisable dans **Grafana**, avec corrélation logs ↔ traces.
 │   └── public/index.php
 ├── otel-collector/
 │   └── config.yaml             # Pipelines traces/metrics/logs
+├── postgres/
+│   └── init.sql                # Création + seed de la table items (base ot_db)
 ├── tempo/
 │   └── tempo.yaml
 ├── loki/
@@ -70,12 +72,14 @@ Services exposés :
 | Prometheus  | http://localhost:9090         |
 | Tempo       | http://localhost:3200          |
 | Loki        | http://localhost:3100          |
+| Postgres    | localhost:5432 (db `ot_db`, user/pass `otel`/`otel`) |
 
 ## Tester l'application
 
 ```bash
 curl http://localhost:8080/
 curl http://localhost:8080/error
+curl http://localhost:8080/data
 ```
 
 Chaque appel :
@@ -83,6 +87,11 @@ Chaque appel :
 - incrémente des compteurs (`http_requests_total`, `http_requests_errors_total`)
   et alimente un histogramme de durée, visibles dans Prometheus ;
 - écrit des logs structurés (via Monolog) corrélés au `trace_id`, envoyés à Loki.
+
+`/data` fait en plus un `SELECT` sur la table `items` de Postgres (créée et
+seedée par `postgres/init.sql`), dans une span client dédiée (`pg.select items`,
+attributs `db.system`/`db.name`/`db.statement`) ; le résultat est renvoyé dans
+le champ `data` de la réponse JSON.
 
 La réponse JSON contient le `trace_id` de la requête, pratique pour la
 retrouver directement dans Tempo ou dans les logs Loki.
