@@ -14,24 +14,24 @@ Le tout est visualisable dans **Grafana**, avec corrélation logs ↔ traces.
 ```
 ┌──────────┐   OTLP/HTTP    ┌────────────────────┐
 │ php-app  │ ─────────────► │  OTel Collector     │
-└────┬─────┘                │  (traces/metrics/   │
-     │ SQL (PDO)            │   logs)             │
-     ▼                      └──────┬──────┬───────┘
-┌──────────┐        OTLP gRPC │  │      │ OTLP HTTP (/otlp)
-│ postgres │                  ▼  │      ▼
-│ (ot_db)  │             ┌───────┴──┐ ┌──────┐
-└──────────┘             │  Tempo   │ │ Loki │
-                          └──────────┘ └──────┘
-                                        ▲
-                        Prometheus scrape (:8889)
-                                        │
-                                 ┌─────────────┐
-                                 │ Prometheus  │
-                                 └─────────────┘
-                                        │
-                                 ┌─────────────┐
-                                 │  Grafana    │
-                                 └─────────────┘
+└─┬───┬────┘                │  (traces/metrics/   │
+  │   │ AMQP                │   logs)             │
+  │   ▼                     └──────┬──────┬───────┘
+  │ ┌──────────┐      OTLP gRPC │  │      │ OTLP HTTP (/otlp)
+  │ │ rabbitmq │                ▼  │      ▼
+  │ │ (orders) │           ┌───────┴──┐ ┌──────┐
+  │ └──────────┘           │  Tempo   │ │ Loki │
+  │ SQL (PDO)               └──────────┘ └──────┘
+  ▼                                       ▲
+┌──────────┐            Prometheus scrape (:8889)
+│ postgres │                             │
+│ (ot_db)  │                      ┌─────────────┐
+└──────────┘                      │ Prometheus  │
+                                   └─────────────┘
+                                          │
+                                   ┌─────────────┐
+                                   │  Grafana    │
+                                   └─────────────┘
 ```
 
 ## Structure du projet
@@ -46,7 +46,7 @@ Le tout est visualisable dans **Grafana**, avec corrélation logs ↔ traces.
 ├── otel-collector/
 │   └── config.yaml             # Pipelines traces/metrics/logs
 ├── postgres/
-│   └── init.sql                # Création + seed de la table items (base ot_db)
+│   └── init.sql                # Création + seed des tables items/orders (base ot_db)
 ├── tempo/
 │   └── tempo.yaml
 ├── loki/
@@ -73,6 +73,7 @@ Services exposés :
 | Tempo       | http://localhost:3200          |
 | Loki        | http://localhost:3100          |
 | Postgres    | localhost:5432 (db `ot_db`, user/pass `otel`/`otel`) |
+| RabbitMQ    | localhost:5672 (AMQP), UI management http://localhost:15672 (otel/otel) |
 
 ## Tester l'application
 
@@ -80,6 +81,7 @@ Services exposés :
 curl http://localhost:8080/
 curl http://localhost:8080/error
 curl http://localhost:8080/data
+curl http://localhost:8080/order
 ```
 
 Chaque appel :
@@ -92,6 +94,12 @@ Chaque appel :
 seedée par `postgres/init.sql`), dans une span client dédiée (`pg.select items`,
 attributs `db.system`/`db.name`/`db.statement`) ; le résultat est renvoyé dans
 le champ `data` de la réponse JSON.
+
+`/order` sélectionne une commande dans la table `orders` (span client
+`pg.select orders`) puis publie le résultat en JSON sur la file RabbitMQ
+`orders` (span producer `orders publish`, attributs `messaging.system`/
+`destination`/`operation`) ; la commande publiée est renvoyée dans le champ
+`data` de la réponse.
 
 La réponse JSON contient le `trace_id` de la requête, pratique pour la
 retrouver directement dans Tempo ou dans les logs Loki.

@@ -19,9 +19,15 @@ services:
       POSTGRES_DB: "ot_db"
       POSTGRES_USER: "otel"
       POSTGRES_PASSWORD: "otel"
+      RABBITMQ_HOST: "rabbitmq"
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: "otel"
+      RABBITMQ_PASSWORD: "otel"
+      RABBITMQ_QUEUE: "orders"
     depends_on:
       - otel-collector
       - postgres
+      - rabbitmq
     networks: [observability]
 
   postgres:
@@ -36,6 +42,17 @@ services:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5432:5432"
+    networks: [observability]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: "otel"
+      RABBITMQ_DEFAULT_PASS: "otel"
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # UI de management
     networks: [observability]
 
   otel-collector:

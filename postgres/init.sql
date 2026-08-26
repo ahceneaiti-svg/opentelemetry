@@ -13,3 +13,18 @@ INSERT INTO items (name, value) VALUES
     ('beta', 20),
     ('gamma', 30)
 ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS orders (
+    id SERIAL PRIMARY KEY,
+    customer VARCHAR(100) NOT NULL,
+    product VARCHAR(100) NOT NULL,
+    quantity INTEGER NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO orders (customer, product, quantity) VALUES
+    ('Alice', 'Widget', 2),
+    ('Bob', 'Gadget', 1),
+    ('Carol', 'Gizmo', 5)
+ON CONFLICT DO NOTHING;

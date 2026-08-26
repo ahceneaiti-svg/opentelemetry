@@ -9,6 +9,8 @@ use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\Contrib\Logs\Monolog\Handler as OtelMonologHandler;
+use PhpAmqpLib\Connection\AMQPStreamConnection;
+use PhpAmqpLib\Message\AMQPMessage;
 use Psr\Log\LogLevel;
 
 // Le SDK OpenTelemetry est déjà initialisé automatiquement grâce à
@@ -59,6 +61,7 @@ try {
     $extra = match ($route) {
         '/error' => simulateError($tracer, $logger),
         '/data' => fetchData($tracer, $logger),
+        '/order' => placeOrder($tracer, $logger),
         default => simulateWork($tracer, $logger),
     };
 
@@ -133,6 +136,25 @@ function simulateError($tracer, Logger $logger): void
 }
 
 /**
+ * Ouvre une connexion PDO vers Postgres à partir des variables d'env
+ * POSTGRES_* (docker-compose.yml). Partagée par toutes les routes qui
+ * accèdent à la base.
+ */
+function pgConnect(): \PDO
+{
+    $dsn = sprintf(
+        'pgsql:host=%s;port=%s;dbname=%s',
+        getenv('POSTGRES_HOST') ?: 'postgres',
+        getenv('POSTGRES_PORT') ?: '5432',
+        getenv('POSTGRES_DB') ?: 'ot_db',
+    );
+
+    return new \PDO($dsn, getenv('POSTGRES_USER') ?: 'otel', getenv('POSTGRES_PASSWORD') ?: 'otel', [
+        \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+    ]);
+}
+
+/**
  * Route /data : SELECT simple sur la table items (Postgres), avec une
  * span client dédiée portant les attributs sémantiques db.*.
  */
@@ -149,17 +171,7 @@ function fetchData($tracer, Logger $logger): array
         $span->setAttribute('db.name', getenv('POSTGRES_DB') ?: 'ot_db');
         $span->setAttribute('db.statement', $statement);
 
-        $dsn = sprintf(
-            'pgsql:host=%s;port=%s;dbname=%s',
-            getenv('POSTGRES_HOST') ?: 'postgres',
-            getenv('POSTGRES_PORT') ?: '5432',
-            getenv('POSTGRES_DB') ?: 'ot_db',
-        );
-        $pdo = new \PDO($dsn, getenv('POSTGRES_USER') ?: 'otel', getenv('POSTGRES_PASSWORD') ?: 'otel', [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-        ]);
-
-        $rows = $pdo->query($statement)->fetchAll(\PDO::FETCH_ASSOC);
+        $rows = pgConnect()->query($statement)->fetchAll(\PDO::FETCH_ASSOC);
         $logger->info('Lecture table items', ['count' => count($rows)]);
 
         return $rows;
@@ -167,4 +179,73 @@ function fetchData($tracer, Logger $logger): array
         $span->end();
         $scope->detach();
     }
+}
+
+/**
+ * Route /order : lit une commande dans la table orders (Postgres) puis
+ * publie un message sur la file RabbitMQ correspondante. Deux sous-spans
+ * dédiées (client DB, producer messaging) pour distinguer les deux appels
+ * externes dans la trace.
+ */
+function placeOrder($tracer, Logger $logger): array
+{
+    $dbSpan = $tracer->spanBuilder('pg.select orders')
+        ->setSpanKind(SpanKind::KIND_CLIENT)
+        ->startSpan();
+    $dbScope = $dbSpan->activate();
+
+    try {
+        $statement = 'SELECT id, customer, product, quantity, status FROM orders ORDER BY random() LIMIT 1';
+        $dbSpan->setAttribute('db.system', 'postgresql');
+        $dbSpan->setAttribute('db.name', getenv('POSTGRES_DB') ?: 'ot_db');
+        $dbSpan->setAttribute('db.statement', $statement);
+
+        $order = pgConnect()->query($statement)->fetch(\PDO::FETCH_ASSOC);
+        if ($order === false) {
+            throw new \RuntimeException('Aucune commande trouvée en base');
+        }
+
+        $logger->info('Commande sélectionnée', ['order_id' => $order['id']]);
+    } finally {
+        $dbSpan->end();
+        $dbScope->detach();
+    }
+
+    $queue = getenv('RABBITMQ_QUEUE') ?: 'orders';
+
+    $mqSpan = $tracer->spanBuilder("$queue publish")
+        ->setSpanKind(SpanKind::KIND_PRODUCER)
+        ->startSpan();
+    $mqScope = $mqSpan->activate();
+
+    try {
+        $mqSpan->setAttribute('messaging.system', 'rabbitmq');
+        $mqSpan->setAttribute('messaging.destination', $queue);
+        $mqSpan->setAttribute('messaging.operation', 'publish');
+
+        $connection = new AMQPStreamConnection(
+            getenv('RABBITMQ_HOST') ?: 'rabbitmq',
+            (int) (getenv('RABBITMQ_PORT') ?: 5672),
+            getenv('RABBITMQ_USER') ?: 'otel',
+            getenv('RABBITMQ_PASSWORD') ?: 'otel',
+        );
+        $channel = $connection->channel();
+        $channel->queue_declare($queue, false, true, false, false);
+
+        $message = new AMQPMessage(json_encode($order), [
+            'content_type' => 'application/json',
+            'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT,
+        ]);
+        $channel->basic_publish($message, '', $queue);
+
+        $channel->close();
+        $connection->close();
+
+        $logger->info('Commande publiée sur RabbitMQ', ['order_id' => $order['id'], 'queue' => $queue]);
+    } finally {
+        $mqSpan->end();
+        $mqScope->detach();
+    }
+
+    return $order;
 }
