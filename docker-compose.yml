@@ -14,8 +14,28 @@ services:
       OTEL_LOGS_EXPORTER: "otlp"
       OTEL_PROPAGATORS: "baggage,tracecontext"
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "ot_db"
+      POSTGRES_USER: "otel"
+      POSTGRES_PASSWORD: "otel"
     depends_on:
       - otel-collector
+      - postgres
+    networks: [observability]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: "ot_db"
+      POSTGRES_USER: "otel"
+      POSTGRES_PASSWORD: "otel"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
     networks: [observability]
 
   otel-collector:
@@ -89,6 +109,7 @@ volumes:
   loki-data:
   prometheus-data:
   grafana-data:
+  postgres-data:
 
 networks:
   observability:

@@ -56,19 +56,24 @@ header('Content-Type: application/json');
 try {
     $logger->info('Requête reçue', ['route' => $route, 'method' => $method]);
 
-    match ($route) {
+    $extra = match ($route) {
         '/error' => simulateError($tracer, $logger),
+        '/data' => fetchData($tracer, $logger),
         default => simulateWork($tracer, $logger),
     };
 
     $traceId = $span->getContext()->getTraceId();
     $span->setStatus(StatusCode::STATUS_OK);
 
-    echo json_encode([
+    $payload = [
         'status' => 'ok',
         'route' => $route,
         'trace_id' => $traceId,
-    ]);
+    ];
+    if ($extra !== null) {
+        $payload['data'] = $extra;
+    }
+    echo json_encode($payload);
 } catch (\Throwable $e) {
     $errorCounter->add(1, ['route' => $route]);
     $span->recordException($e);
@@ -124,5 +129,42 @@ function simulateError($tracer, Logger $logger): void
     } finally {
         $child->end();
         $childScope->detach();
+    }
+}
+
+/**
+ * Route /data : SELECT simple sur la table items (Postgres), avec une
+ * span client dédiée portant les attributs sémantiques db.*.
+ */
+function fetchData($tracer, Logger $logger): array
+{
+    $span = $tracer->spanBuilder('pg.select items')
+        ->setSpanKind(SpanKind::KIND_CLIENT)
+        ->startSpan();
+    $scope = $span->activate();
+
+    try {
+        $statement = 'SELECT id, name, value, created_at FROM items ORDER BY id';
+        $span->setAttribute('db.system', 'postgresql');
+        $span->setAttribute('db.name', getenv('POSTGRES_DB') ?: 'ot_db');
+        $span->setAttribute('db.statement', $statement);
+
+        $dsn = sprintf(
+            'pgsql:host=%s;port=%s;dbname=%s',
+            getenv('POSTGRES_HOST') ?: 'postgres',
+            getenv('POSTGRES_PORT') ?: '5432',
+            getenv('POSTGRES_DB') ?: 'ot_db',
+        );
+        $pdo = new \PDO($dsn, getenv('POSTGRES_USER') ?: 'otel', getenv('POSTGRES_PASSWORD') ?: 'otel', [
+            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+        ]);
+
+        $rows = $pdo->query($statement)->fetchAll(\PDO::FETCH_ASSOC);
+        $logger->info('Lecture table items', ['count' => count($rows)]);
+
+        return $rows;
+    } finally {
+        $span->end();
+        $scope->detach();
     }
 }
